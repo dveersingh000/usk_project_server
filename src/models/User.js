@@ -9,10 +9,16 @@ const userSchema = new mongoose.Schema(
     phone: { type: String, unique: true, sparse: true }, 
     password: { type: String, required: true },
     referralCode: { type: String },
+    resetOtp: { type: String },
+  resetOtpExpiry: { type: Date },
     role: { type: String, enum: ['cma', 'country_admin', 'state_admin', 'district_admin', 'district_super_admin', 'distributor_admin', 'block_admin', 'GPN_admin' ], required: true },
   },
   { timestamps: true }
 );
+
+// ✅ Ensure `phone` index allows multiple null values
+userSchema.index({ phone: 1 }, { unique: true, sparse: true });
+userSchema.index({ email: 1 }, { unique: true, sparse: true });
 
 // Hash password before saving
 userSchema.pre("save", async function (next) {

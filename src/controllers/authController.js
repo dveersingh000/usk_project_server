@@ -49,8 +49,8 @@ exports.registerUser = async (req, res) => {
         const newUser = new User({
             firstName,
             lastName,
-            email,
-            phone,
+            email: email || undefined,  // ✅ fixes null storage
+            phone: phone || undefined,  // ✅ fixes null storage
             password,
             referralCode,
             role
@@ -67,44 +67,52 @@ exports.registerUser = async (req, res) => {
 
 
 exports.loginUser = async (req, res) => {
-    try {
-        const { emailOrPhone, password, role } = req.body;
+  try {
+    const { emailOrPhone, password, role } = req.body;
 
-        // Determine if input is email or phone number
-        let email = emailOrPhone.includes("@") ? emailOrPhone : null;
-        let phone = emailOrPhone.match(/^\d{10}$/) ? emailOrPhone : null;
+    let email = emailOrPhone.includes("@") ? emailOrPhone.trim().toLowerCase() : null;
+    let phone = emailOrPhone.match(/^\d{10}$/) ? emailOrPhone.trim() : null;
 
-        if (!email && !phone) {
-            return res.status(400).json({ message: "Please enter a valid email or phone number." });
-        }
-
-        // Find user using either email or phone
-        let user = await User.findOne({ $or: [{ email }, { phone }] });
-
-        if (!user) {
-            return res.status(400).json({ message: "Invalid credentials" });
-        }
-
-        // Check if the role matches
-        if (user.role !== role) {
-            return res.status(400).json({ message: "Incorrect role selected" });
-        }
-
-        // Check if the password is correct
-        const isMatch = await user.matchPassword(password);
-        if (!isMatch) {
-            return res.status(400).json({ message: "Invalid credentials" });
-        }
-
-        // Generate JWT Token
-        const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: "7d" });
-
-        res.status(200).json({ message: "Login successful", token, user });
-    } catch (error) {
-        console.error("🔥 Login Error:", error.message);
-        res.status(500).json({ message: "Server error", error: error.message });
+    if (!email && !phone) {
+      return res.status(400).json({ message: "Please enter a valid email or phone number." });
     }
+
+    // 🔥 Correct precise user lookup
+    let user = null;
+    if (email) {
+      user = await User.findOne({ email });
+    } else if (phone) {
+      user = await User.findOne({ phone });
+    }
+
+    if (!user) {
+      return res.status(400).json({ message: "Invalid credentials" });
+    }
+
+    // 🔒 Role match
+    if (user.role.toLowerCase().trim() !== role.toLowerCase().trim()) {
+      console.log("User role from DB:", user.role);
+      console.log("Role from request:", role);
+      return res.status(400).json({ message: "Incorrect role selected" });
+    }
+
+    // 🔑 Password match
+    const isMatch = await user.matchPassword(password);
+    if (!isMatch) {
+      return res.status(400).json({ message: "Invalid credentials" });
+    }
+
+    const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET, {
+      expiresIn: "7d",
+    });
+
+    res.status(200).json({ message: "Login successful", token, user });
+  } catch (error) {
+    console.error("🔥 Login Error:", error.message);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
 };
+
 
 
 
@@ -126,39 +134,75 @@ const transporter = nodemailer.createTransport({
       const { emailOrPhone } = req.body;
   
       if (!emailOrPhone) {
-        return res.status(400).json({ message: "Please provide email or phone number." });
+        return res.status(400).json({ message: "Email or phone is required." });
       }
   
-      let user = await User.findOne({
-        $or: [{ email: emailOrPhone }, { phone: emailOrPhone }],
-      });
+      const email = emailOrPhone.includes("@") ? emailOrPhone.toLowerCase() : null;
+      const phone = emailOrPhone.match(/^\d{10}$/) ? emailOrPhone : null;
+  
+      let user;
+      if (email) {
+        user = await User.findOne({ email });
+      } else if (phone) {
+        user = await User.findOne({ phone });
+      }
   
       if (!user) {
-        return res.status(400).json({ message: "User not found." });
+        return res.status(404).json({ message: "User not found." });
       }
   
-      // Generate OTP and store it with expiration time (5 minutes)
-      const otp = generateOTP();
+      // Generate and save OTP
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
       user.resetOtp = otp;
-      user.resetOtpExpiry = Date.now() + 5 * 60 * 1000; // 5 minutes from now
+      user.resetOtpExpiry = Date.now() + 5 * 60 * 1000; // 5 minutes
       await user.save();
   
-      // Send OTP via email (extend for SMS if needed)
       if (user.email) {
         await transporter.sendMail({
           from: process.env.EMAIL_USER,
           to: user.email,
           subject: "Password Reset OTP",
-          text: `Your OTP for password reset is: ${otp}. It expires in 5 minutes.`,
+          text: `Your OTP is: ${otp} (valid for 5 mins)`,
         });
       }
   
-      res.status(200).json({ message: "OTP sent successfully. Check your email." });
+      res.status(200).json({ message: "OTP sent to your email." });
     } catch (error) {
       console.error("🔥 Forgot Password Error:", error.message);
       res.status(500).json({ message: "Server error", error: error.message });
     }
   };
+  
+
+  exports.verifyOtp = async (req, res) => {
+    try {
+      const { emailOrPhone, otp } = req.body;
+  
+      if (!emailOrPhone || !otp) {
+        return res.status(400).json({ message: "Both email/phone and OTP are required." });
+      }
+  
+      const email = emailOrPhone.includes("@") ? emailOrPhone.toLowerCase() : null;
+      const phone = emailOrPhone.match(/^\d{10}$/) ? emailOrPhone : null;
+  
+      let user;
+      if (email) {
+        user = await User.findOne({ email });
+      } else if (phone) {
+        user = await User.findOne({ phone });
+      }
+  
+      if (!user || user.resetOtp !== otp || user.resetOtpExpiry < Date.now()) {
+        return res.status(400).json({ message: "Invalid or expired OTP." });
+      }
+  
+      res.status(200).json({ message: "OTP verified successfully." });
+    } catch (error) {
+      console.error("🔥 Verify OTP Error:", error.message);
+      res.status(500).json({ message: "Server error", error: error.message });
+    }
+  };
+  
   
   // Reset Password API
   exports.resetPassword = async (req, res) => {
@@ -169,24 +213,33 @@ const transporter = nodemailer.createTransport({
         return res.status(400).json({ message: "All fields are required." });
       }
   
-      let user = await User.findOne({
-        $or: [{ email: emailOrPhone }, { phone: emailOrPhone }],
-        resetOtp: otp,
-        resetOtpExpiry: { $gt: Date.now() },
-      });
-  
-      if (!user) {
-        return res.status(400).json({ message: "Invalid OTP or OTP expired." });
+      const passwordRegex = /^(?=.*[A-Z])(?=.*\d).{6,}$/;
+      if (!passwordRegex.test(newPassword)) {
+        return res.status(400).json({
+          message: "Password must be at least 6 characters, contain 1 uppercase letter and 1 number.",
+        });
       }
   
-      // Hash new password and update user
-      const hashedPassword = await bcrypt.hash(newPassword, 10);
-      user.password = hashedPassword;
-      user.resetOtp = undefined;
-      user.resetOtpExpiry = undefined;
+      const email = emailOrPhone.includes("@") ? emailOrPhone.toLowerCase() : null;
+      const phone = emailOrPhone.match(/^\d{10}$/) ? emailOrPhone : null;
+  
+      let user;
+      if (email) {
+        user = await User.findOne({ email });
+      } else if (phone) {
+        user = await User.findOne({ phone });
+      }
+  
+      if (!user || user.resetOtp !== otp || user.resetOtpExpiry < Date.now()) {
+        return res.status(400).json({ message: "Invalid or expired OTP." });
+      }
+  
+      user.password = newPassword;
+      user.resetOtp = null;
+      user.resetOtpExpiry = null;
       await user.save();
   
-      res.status(200).json({ message: "Password reset successfully." });
+      res.status(200).json({ message: "Password reset successful. Please login with your new password." });
     } catch (error) {
       console.error("🔥 Reset Password Error:", error.message);
       res.status(500).json({ message: "Server error", error: error.message });
